@@ -1,0 +1,8 @@
+[[hooks]]
+stage = "pre_build"
+command = "sh"
+command_arguments = ["-c", "clear"]
+
+
+[watch]
+watch = ["src", "Cargo.toml", "Trunk.toml", "index.html"]

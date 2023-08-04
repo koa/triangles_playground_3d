@@ -1,0 +1,46 @@
+<!DOCTYPE html><html lang="en"><head>
+		<meta charset="utf-8">
+		<title>kiss3d • WASM demo</title>
+		<style>
+			html, body, canvas {
+				margin: 0px;
+				padding: 0px;
+				width: 100%;
+				height: 100%;
+				overflow: hidden;
+			}
+		</style>
+	
+<link rel="preload" href="/triangles-playground-3d-78d7a759eb6ff4de_bg.wasm" as="fetch" type="application/wasm" crossorigin="">
+<link rel="modulepreload" href="/triangles-playground-3d-78d7a759eb6ff4de.js"></head>
+	<body>
+		<canvas oncontextmenu="return false;" id="canvas"></canvas>
+	
+<script type="module">import init from '/triangles-playground-3d-78d7a759eb6ff4de.js';init('/triangles-playground-3d-78d7a759eb6ff4de_bg.wasm');</script><script>(function () {
+    var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = protocol + '//' + window.location.host + '/_trunk/ws';
+    var poll_interval = 5000;
+    var reload_upon_connect = () => {
+        window.setTimeout(
+            () => {
+                // when we successfully reconnect, we'll force a
+                // reload (since we presumably lost connection to
+                // trunk due to it being killed, so it will have
+                // rebuilt on restart)
+                var ws = new WebSocket(url);
+                ws.onopen = () => window.location.reload();
+                ws.onclose = reload_upon_connect;
+            },
+            poll_interval);
+    };
+
+    var ws = new WebSocket(url);
+    ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.reload) {
+            window.location.reload();
+        }
+    };
+    ws.onclose = reload_upon_connect;
+})()
+</script></body></html>
