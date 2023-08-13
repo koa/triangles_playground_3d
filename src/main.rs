@@ -17,20 +17,33 @@ use kiss3d::renderer::Renderer;
 use kiss3d::scene::SceneNode;
 use kiss3d::window::{State, Window};
 use log::info;
+use self_cell::self_cell;
 use stl_io::Vector;
+use triangles::prelude::Plane3d;
+use triangles::prelude::ReferencedTriangle;
 use triangles::prelude::{
-    IndexedTriangleList, Line3d, Point3d, StaticLine3d, Triangle3d, TriangleTopology, Vector3d,
+    IndexedTriangleList, Point3d, StaticLine3d, Triangle3d, TriangleTopology, Vector3d,
 };
 use wasm_bindgen::prelude::*;
 
+type TopologyType<'a> = TriangleTopology<'a, Vector3d>;
+
+self_cell!(
+    struct GeometryData {
+        owner: IndexedTriangleList<Vector3d>,
+        #[covariant]
+        dependent: TopologyType,
+    }
+);
+
 struct AppState {
+    data: GeometryData,
     camera: ArcBall,
     rot: UnitQuaternion<f32>,
     last_pos: Point2<f32>,
-    triangles: IndexedTriangleList<Vector3d>,
-    //topology: TriangleTopology<'a, Vector<f32>>,
     group: SceneNode,
     hit_marker: Option<SceneNode>,
+    selection_state: Option<usize>,
 }
 
 impl State for AppState {
@@ -47,36 +60,20 @@ impl State for AppState {
                 WindowEvent::MouseButton(button, action, modif) => {
                     //info!("mouse press event on {:?} with {:?}", button, modif);
                     if button == MouseButton::Button2 {
-                        let window_size =
-                            Vector2::new(window.size()[0] as f32, window.size()[1] as f32);
-                        let (sel_pos, dir) = self.camera.unproject(&self.last_pos, &window_size);
-                        //info!(                        "conv {:?} to {:?} win siz {:?} ",                        self.last_pos, sel_pos, window_size                    );
-                        let camera_pos = self.camera.eye();
-                        //info!("diff: {:?}", camera_pos - sel_pos);
-                        let sel_pos = webgl2triangles(&sel_pos);
-                        let sight_line = StaticLine3d::new(sel_pos, webgl2triangles(&dir));
-                        let topology =
-                            TriangleTopology::new(&self.triangles).expect("Topology error");
-                        let hit_point = topology.find_first_intersection(&sight_line);
-                        info!("Hit point: {}", hit_point.is_some());
-                        /*info!(
-                            "Button: {button:?}, action: {action:?}, {camera_pos}, {:?}",
-                            hit_point.map(|(p, _, _)| p)
-                        );*/
-                        window.remove_node(&mut self.group);
+                        let hit_point =
+                            Self::find_element_at(window, &self.last_pos, &self.data, &self.camera);
+
                         if let Some(old_marker) = &mut self.hit_marker {
                             window.remove_node(old_marker);
                         }
-                        self.group = draw_geometry(window, &self.triangles);
-                        //self.group.set_visible(false);
                         self.hit_marker = hit_point.map(|hit| {
                             let p = hit.0;
                             let mut marker = window.add_group();
                             Self::add_sphere_at(&mut marker, &p).set_color(1.0, 0.0, 0.0);
-                            Self::add_sphere_at(&mut marker, &sight_line.p1())
-                                .set_color(0.0, 1.0, 0.0);
-                            Self::add_sphere_at(&mut marker, &sight_line.p2())
-                                .set_color(0.0, 0.0, 1.0);
+                            //Self::add_sphere_at(&mut marker, &sight_line.p1())
+                            //    .set_color(0.0, 1.0, 0.0);
+                            //Self::add_sphere_at(&mut marker, &sight_line.p2())
+                            //    .set_color(0.0, 0.0, 1.0);
                             /*Self::add_sphere_at(&mut marker, &webgl2triangles(&camera_pos))
                             .set_color(0.0, 1.0, 1.0);*/
                             let triangle = hit.2;
@@ -100,8 +97,45 @@ impl State for AppState {
                 }
                 WindowEvent::CursorPos(x, y, modifiers) => {
                     self.last_pos = Point2::new(x as f32, y as f32);
-                    //self.camera.un
-                    //info!("x: {x}, y:{y}, m: {modifiers:?}")
+
+                    let hit_point =
+                        Self::find_element_at(window, &self.last_pos, &self.data, &self.camera);
+
+                    let selection_state = hit_point.map(|p| p.2.idx());
+
+                    if selection_state != self.selection_state {
+                        self.selection_state = selection_state;
+                        if let Some(old_marker) = &mut self.hit_marker {
+                            window.remove_node(old_marker);
+                        }
+                        self.hit_marker = hit_point.map(|hit| {
+                            let p = hit.0;
+                            let mut marker = window.add_group();
+                            //Self::add_sphere_at(&mut marker, &p).set_color(1.0, 0.0, 0.0);
+                            //Self::add_sphere_at(&mut marker, &sight_line.p1())
+                            //    .set_color(0.0, 1.0, 0.0);
+                            //Self::add_sphere_at(&mut marker, &sight_line.p2())
+                            //    .set_color(0.0, 0.0, 1.0);
+                            /*Self::add_sphere_at(&mut marker, &webgl2triangles(&camera_pos))
+                            .set_color(0.0, 1.0, 1.0);*/
+                            let triangle = hit.2;
+                            let [p1, p2, p3] = triangle.points();
+
+                            let mesh = TriMesh::new(
+                                vec![
+                                    vector2webgl(p1.coordinates()),
+                                    vector2webgl(p2.coordinates()),
+                                    vector2webgl(p3.coordinates()),
+                                ],
+                                None,
+                                None,
+                                None,
+                            );
+                            let scale = 1.0;
+                            marker.add_trimesh(mesh, Vector3::new(scale, scale, scale));
+                            marker
+                        });
+                    }
                 }
                 WindowEvent::CursorEnter(_) => {}
                 WindowEvent::Scroll(_, _, _) => {}
@@ -136,6 +170,20 @@ impl AppState {
         ));
         sphere
     }
+
+    fn find_element_at<'a>(
+        window: &Window,
+        point: &Point2<f32>,
+        data: &'a GeometryData,
+        camera: &ArcBall,
+    ) -> Option<(Vector3d, &'a Plane3d, &'a ReferencedTriangle<'a, Vector3d>)> {
+        let window_size = Vector2::new(window.size()[0] as f32, window.size()[1] as f32);
+        let (sel_pos, dir) = camera.unproject(point, &window_size);
+        let sel_pos = webgl2triangles(&sel_pos);
+        let sight_line = StaticLine3d::new(sel_pos, webgl2triangles(&dir));
+        let topology = data.borrow_dependent();
+        topology.find_first_intersection(&sight_line)
+    }
 }
 
 #[cfg(not(debug_assertions))]
@@ -153,8 +201,11 @@ pub fn main() -> Result<(), JsValue> {
     let stl_mesh = stl_io::read_stl(&mut cursor).expect("Cannot load stl file");
     let triangle_list: IndexedTriangleList<_> = stl_mesh.into();
     let triangle_list = triangle_list.transform_points(stl2triangles);
+    let data = GeometryData::new(triangle_list, |d| {
+        TriangleTopology::new(d).expect("Topology error")
+    });
 
-    let group = draw_geometry(&mut window, &triangle_list);
+    let group = draw_geometry(&mut window, data.borrow_owner());
 
     window.set_light(Light::StickToCamera);
 
@@ -165,8 +216,9 @@ pub fn main() -> Result<(), JsValue> {
         rot,
         camera,
         last_pos: Point2::new(0.0, 0.0),
-        triangles: triangle_list,
+        data,
         hit_marker: None,
+        selection_state: None,
     };
 
     window.render_loop(state);

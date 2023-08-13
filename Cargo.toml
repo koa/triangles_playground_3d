@@ -15,3 +15,4 @@ stl_io = "0.7.0"
 kiss3d = { version = "0.35.0" }
 nalgebra = "0.18"
 rand = { version = "0.6" }
+self_cell = "1.0.1"
