@@ -1,14 +1,15 @@
 //extern crate kiss3d;
 //extern crate nalgebra as na;
 
-use kiss3d::camera::{ArcBall, Camera, FixedView};
-use kiss3d::event::{Event, WindowEvent};
 use std::collections::HashSet;
 use std::io::Cursor;
-use wasm_bindgen::prelude::*;
+use std::ops::Index;
 
+use kiss3d::camera::{ArcBall, Camera};
+use kiss3d::event::{MouseButton, WindowEvent};
 use kiss3d::light::Light;
-use kiss3d::nalgebra::{Point, Point2, Point3, UnitQuaternion, Vector2, Vector3};
+use kiss3d::nalgebra::{Const, OPoint, Point, Point2, Point3, UnitQuaternion, Vector2, Vector3};
+use kiss3d::ncollide3d::math::Translation;
 use kiss3d::ncollide3d::procedural::{IndexBuffer, TriMesh};
 use kiss3d::planar_camera::PlanarCamera;
 use kiss3d::post_processing::PostProcessingEffect;
@@ -17,18 +18,22 @@ use kiss3d::scene::SceneNode;
 use kiss3d::window::{State, Window};
 use log::info;
 use stl_io::Vector;
-use triangles::prelude::{IndexedTriangleList, Triangle3d, TriangleTopology};
+use triangles::prelude::{
+    IndexedTriangleList, Line3d, Point3d, StaticLine3d, Triangle3d, TriangleTopology, Vector3d,
+};
+use wasm_bindgen::prelude::*;
 
-struct AppState<'a> {
-    c: SceneNode,
+struct AppState {
     camera: ArcBall,
     rot: UnitQuaternion<f32>,
     last_pos: Point2<f32>,
-    triangles: IndexedTriangleList<Vector<f32>>,
-    topology: TriangleTopology<'a, Vector<f32>>,
+    triangles: IndexedTriangleList<Vector3d>,
+    //topology: TriangleTopology<'a, Vector<f32>>,
+    group: SceneNode,
+    hit_marker: Option<SceneNode>,
 }
 
-impl State for AppState<'_> {
+impl State for AppState {
     fn step(&mut self, window: &mut Window) {
         for event in window.events().iter() {
             match event.value {
@@ -40,16 +45,58 @@ impl State for AppState<'_> {
                 WindowEvent::Iconify(_) => {}
                 WindowEvent::FramebufferSize(_, _) => {}
                 WindowEvent::MouseButton(button, action, modif) => {
-                    info!("mouse press event on {:?} with {:?}", button, modif);
-                    let window_size =
-                        Vector2::new(window.size()[0] as f32, window.size()[1] as f32);
-                    let sel_pos = self.camera.unproject(&self.last_pos, &window_size);
-                    info!(
-                        "conv {:?} to {:?} win siz {:?} ",
-                        self.last_pos, sel_pos, window_size
-                    );
-                    let camera_pos = self.camera.eye();
-                    info!("Button: {button:?}, action: {action:?}, {camera_pos}");
+                    //info!("mouse press event on {:?} with {:?}", button, modif);
+                    if button == MouseButton::Button2 {
+                        let window_size =
+                            Vector2::new(window.size()[0] as f32, window.size()[1] as f32);
+                        let (sel_pos, dir) = self.camera.unproject(&self.last_pos, &window_size);
+                        //info!(                        "conv {:?} to {:?} win siz {:?} ",                        self.last_pos, sel_pos, window_size                    );
+                        let camera_pos = self.camera.eye();
+                        //info!("diff: {:?}", camera_pos - sel_pos);
+                        let sel_pos = webgl2triangles(&sel_pos);
+                        let sight_line = StaticLine3d::new(sel_pos, webgl2triangles(&dir));
+                        let topology =
+                            TriangleTopology::new(&self.triangles).expect("Topology error");
+                        let hit_point = topology.find_first_intersection(&sight_line);
+                        info!("Hit point: {}", hit_point.is_some());
+                        /*info!(
+                            "Button: {button:?}, action: {action:?}, {camera_pos}, {:?}",
+                            hit_point.map(|(p, _, _)| p)
+                        );*/
+                        window.remove_node(&mut self.group);
+                        if let Some(old_marker) = &mut self.hit_marker {
+                            window.remove_node(old_marker);
+                        }
+                        self.group = draw_geometry(window, &self.triangles);
+                        //self.group.set_visible(false);
+                        self.hit_marker = hit_point.map(|hit| {
+                            let p = hit.0;
+                            let mut marker = window.add_group();
+                            Self::add_sphere_at(&mut marker, &p).set_color(1.0, 0.0, 0.0);
+                            Self::add_sphere_at(&mut marker, &sight_line.p1())
+                                .set_color(0.0, 1.0, 0.0);
+                            Self::add_sphere_at(&mut marker, &sight_line.p2())
+                                .set_color(0.0, 0.0, 1.0);
+                            /*Self::add_sphere_at(&mut marker, &webgl2triangles(&camera_pos))
+                            .set_color(0.0, 1.0, 1.0);*/
+                            let triangle = hit.2;
+                            let [p1, p2, p3] = triangle.points();
+
+                            let mesh = TriMesh::new(
+                                vec![
+                                    vector2webgl(p1.coordinates()),
+                                    vector2webgl(p2.coordinates()),
+                                    vector2webgl(p3.coordinates()),
+                                ],
+                                None,
+                                None,
+                                None,
+                            );
+                            let scale = 1.0;
+                            marker.add_trimesh(mesh, Vector3::new(scale, scale, scale));
+                            marker
+                        });
+                    }
                 }
                 WindowEvent::CursorPos(x, y, modifiers) => {
                     self.last_pos = Point2::new(x as f32, y as f32);
@@ -74,10 +121,23 @@ impl State for AppState<'_> {
         Option<&mut dyn Renderer>,
         Option<&mut dyn PostProcessingEffect>,
     ) {
-        info!("cameras_and_effect_and_renderer");
+        //info!("cameras_and_effect_and_renderer: {:?}", self.camera.eye());
         (Some(&mut self.camera), None, None, None)
     }
 }
+
+impl AppState {
+    fn add_sphere_at(mut node: &mut SceneNode, point: &Vector3d) -> SceneNode {
+        let mut sphere = node.add_sphere(0.005);
+        sphere.append_translation(&Translation::new(
+            point.x.0 as f32,
+            point.y.0 as f32,
+            point.z.0 as f32,
+        ));
+        sphere
+    }
+}
+
 #[cfg(not(debug_assertions))]
 const LOG_LEVEL: log::Level = log::Level::Info;
 #[cfg(debug_assertions)]
@@ -85,16 +145,41 @@ const LOG_LEVEL: log::Level = log::Level::Trace;
 pub fn main() -> Result<(), JsValue> {
     wasm_logger::init(wasm_logger::Config::new(LOG_LEVEL));
 
+    let mut window = Window::new("");
+    window.set_background_color(1.0, 1.0, 1.0);
+
     let bytes = include_bytes!("Schublade - Front.stl");
     let mut cursor = Cursor::new(bytes);
     let stl_mesh = stl_io::read_stl(&mut cursor).expect("Cannot load stl file");
     let triangle_list: IndexedTriangleList<_> = stl_mesh.into();
-    let topology = TriangleTopology::new(&triangle_list).expect("Errors in topology");
+    let triangle_list = triangle_list.transform_points(stl2triangles);
+
+    let group = draw_geometry(&mut window, &triangle_list);
+
+    window.set_light(Light::StickToCamera);
+
+    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
+    let camera = ArcBall::new(Point3::new(0.0, 0.5, -1.0), Point3::new(0.0, 0.0, 0.0));
+    let state = AppState {
+        group,
+        rot,
+        camera,
+        last_pos: Point2::new(0.0, 0.0),
+        triangles: triangle_list,
+        hit_marker: None,
+    };
+
+    window.render_loop(state);
+    Ok(())
+}
+
+fn draw_geometry(window: &mut Window, triangle_list: &IndexedTriangleList<Vector3d>) -> SceneNode {
+    let topology = TriangleTopology::new(triangle_list).expect("Errors in topology");
     let mesh: Vec<_> = topology
         .triangles_of_plane()
         .iter()
         .map(|(plane, triangles)| {
-            let normal = plane.normal();
+            //let normal = plane.normal();
             //let mut point_map = HashMap::new();
             let used_points: HashSet<_> = triangles
                 .iter()
@@ -107,37 +192,44 @@ pub fn main() -> Result<(), JsValue> {
             for (target, source) in used_points.iter().enumerate() {
                 reverse_map[*source] = target;
                 let p = points[*source];
-                coords[target] = Point3::from([p[0], p[1], p[2]]);
+                coords[target] = Point3::from([p[0].0 as f32, p[1].0 as f32, p[2].0 as f32]);
             }
             let faces: Vec<_> = triangles
                 .iter()
                 .map(|tr| Point3::from(tr.points().map(|p| reverse_map[p.idx()] as u32)))
                 .collect();
-            let mesh = TriMesh::new(coords, None, None, Some(IndexBuffer::Unified(faces)));
-            mesh
+            TriMesh::new(coords, None, None, Some(IndexBuffer::Unified(faces)))
         })
         .collect();
 
-    let mut window = Window::new("Kiss3d: wasm example");
-    window.set_background_color(1.0, 1.0, 1.0);
-    let mut c = window.add_cube(0.1, 0.1, 0.1);
+    let mut group = window.add_group();
+    let scale = 1.0;
+    for m in mesh {
+        group.add_trimesh(m, Vector3::new(scale, scale, scale));
+    }
 
-    c.set_color(0.8, 0.8, 2.0);
+    group.set_color(0.8, 0.8, 2.0);
+    group
+}
 
-    window.set_light(Light::StickToCamera);
-
-    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-    let camera = ArcBall::new(Point3::new(0.0, 0.5, -1.0), Point3::new(0.0, 0.0, 0.0));
-    let state = AppState {
-        c,
-        rot,
-        camera,
-        last_pos: Point2::new(0.0, 0.0),
-        triangles: triangle_list,
-    };
-
-    window.render_loop(state);
-    Ok(())
+#[inline]
+fn stl2triangles(p: &Vector<f32>) -> Vector3d {
+    Vector3d::new(
+        (p[0] as f64 / 1000.0).into(),
+        (p[1] as f64 / 1000.0).into(),
+        (p[2] as f64 / 1000.0).into(),
+    )
+}
+#[inline]
+fn webgl2triangles<P: Index<usize, Output = f32>>(p: &P) -> Vector3d {
+    Vector3d::new(
+        (p[0] as f64).into(),
+        (p[1] as f64).into(),
+        (p[2] as f64).into(),
+    )
+}
+fn vector2webgl(p: Vector3d) -> OPoint<f32, Const<3>> {
+    Vector3::new(p.x.0 as f32, p.y.0 as f32, p.z.0 as f32).into()
 }
 
 pub const WIN_W: u32 = 600;
