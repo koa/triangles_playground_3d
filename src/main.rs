@@ -17,13 +17,14 @@ use kiss3d::renderer::Renderer;
 use kiss3d::scene::SceneNode;
 use kiss3d::window::{State, Window};
 use log::info;
+use num_traits::{One, Zero};
 use self_cell::self_cell;
 use stl_io::Vector;
-use triangles::prelude::Plane3d;
 use triangles::prelude::ReferencedTriangle;
 use triangles::prelude::{
     IndexedTriangleList, Point3d, StaticLine3d, Triangle3d, TriangleTopology, Vector3d,
 };
+use triangles::prelude::{Number, Plane3d};
 use wasm_bindgen::prelude::*;
 
 type TopologyType<'a> = TriangleTopology<'a, Vector3d>;
@@ -108,18 +109,78 @@ impl State for AppState {
                         if let Some(old_marker) = &mut self.hit_marker {
                             window.remove_node(old_marker);
                         }
-                        self.hit_marker = hit_point.map(|hit| {
-                            let p = hit.0;
+                        self.hit_marker = hit_point.map(|(p, plane, triangle)| {
                             let mut marker = window.add_group();
-                            //Self::add_sphere_at(&mut marker, &p).set_color(1.0, 0.0, 0.0);
-                            //Self::add_sphere_at(&mut marker, &sight_line.p1())
-                            //    .set_color(0.0, 1.0, 0.0);
-                            //Self::add_sphere_at(&mut marker, &sight_line.p2())
-                            //    .set_color(0.0, 0.0, 1.0);
-                            /*Self::add_sphere_at(&mut marker, &webgl2triangles(&camera_pos))
-                            .set_color(0.0, 1.0, 1.0);*/
-                            let triangle = hit.2;
-                            let [p1, p2, p3] = triangle.points();
+                            let scale = 1.0;
+
+                            let topology = self.data.borrow_dependent();
+                            if let Some((group_anchor, planes)) = topology
+                                .plane_groups()
+                                .iter()
+                                .find(|(group, planes)| planes.contains(plane))
+                            {
+                                let max_dist = planes
+                                    .iter()
+                                    .map(|p| group_anchor.dist_square(p))
+                                    .max()
+                                    .filter(|d| *d > Number::zero())
+                                    .unwrap_or(Number::one());
+                                //info!("Max: {max_dist}");
+                                for plane in planes {
+                                    if let Some(group_of_plane) =
+                                        topology.triangles_of_plane().get(plane)
+                                    {
+                                        let dist =
+                                            (group_anchor.dist_square(plane) / max_dist).0 as f32;
+                                        //info!("Dist: {dist}");
+                                        let triangle_list = self.data.borrow_owner();
+                                        let points = triangle_list.points();
+                                        let mut point_map =
+                                            vec![None; points.len()].into_boxed_slice();
+                                        let mut selected_points = Vec::new();
+                                        let triangles_of_plane = group_of_plane.triangles();
+                                        let mut tr_indices =
+                                            Vec::with_capacity(triangles_of_plane.len());
+                                        for triangle in triangles_of_plane {
+                                            let mapped_points = triangle.points().map(|pt| {
+                                                if let Some(new_idx) = point_map[pt.idx()] {
+                                                    new_idx as u32
+                                                } else {
+                                                    let new_idx = selected_points.len();
+                                                    point_map[pt.idx()] = Some(new_idx);
+                                                    selected_points
+                                                        .push(vector2webgl(pt.coordinates()));
+                                                    new_idx as u32
+                                                }
+                                            });
+                                            tr_indices.push(mapped_points.into());
+                                        }
+
+                                        let mut node = marker.add_trimesh(
+                                            TriMesh::new(
+                                                selected_points,
+                                                None,
+                                                None,
+                                                Some(IndexBuffer::Unified(tr_indices)),
+                                            ),
+                                            Vector3::new(scale, scale, scale),
+                                        );
+                                        let color = if dist > 0.0 {
+                                            let color = dist.log10();
+                                            (color.max(-10.0) + 10.0) / 10.0
+                                        } else {
+                                            0.0
+                                        };
+                                        node.set_color(
+                                            1.0 - color,
+                                            color,
+                                            2.0 * (0.5 - (color - 0.5).abs()),
+                                        );
+                                    }
+                                }
+                            }
+                            /*
+                                                        let [p1, p2, p3] = triangle.points();
 
                             let mesh = TriMesh::new(
                                 vec![
@@ -131,8 +192,11 @@ impl State for AppState {
                                 None,
                                 None,
                             );
-                            let scale = 1.0;
-                            marker.add_trimesh(mesh, Vector3::new(scale, scale, scale));
+
+                            marker
+                                .add_trimesh(mesh, Vector3::new(scale, scale, scale))
+                                .set_color(1.0, 0.0, 0.0);*/
+
                             marker
                         });
                     }
@@ -230,9 +294,10 @@ fn draw_geometry(window: &mut Window, triangle_list: &IndexedTriangleList<Vector
     let mesh: Vec<_> = topology
         .triangles_of_plane()
         .iter()
-        .map(|(plane, triangles)| {
+        .map(|(plane, triangle_group)| {
             //let normal = plane.normal();
             //let mut point_map = HashMap::new();
+            let triangles = triangle_group.triangles();
             let used_points: HashSet<_> = triangles
                 .iter()
                 .flat_map(|tr| tr.points())

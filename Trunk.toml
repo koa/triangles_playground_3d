@@ -5,4 +5,4 @@ command_arguments = ["-c", "clear"]
 
 
 [watch]
-watch = ["src", "Cargo.toml", "Trunk.toml", "index.html"]
+watch = ["src", "Cargo.toml", "Trunk.toml", "index.html", "../triangles/src"]
